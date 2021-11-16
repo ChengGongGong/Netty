@@ -65,8 +65,8 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
 
     3. I/O 多路复用
         一个线程处理多个 I/O 句柄的操作。多路指的是多个数据通道，复用指的是使用一个或多个固定线程来处理每一个 Socket。
+        多个连接会共用一个 Selector 对象，由 Selector 感知连接的读写事件，只需要很少的线程定期从 Selector 上查询连接的读写状态即可。
         select、poll、epoll 都是 I/O 多路复用的具体实现，线程一次 select 调用可以获取内核态中多个数据通道的数据状态；
-        解决了同步阻塞 I/O 和同步非阻塞 I/O 的问题。
         在该场景下，当有数据就绪时，需要一个事件分发器（Event Dispather），它负责将读写事件分发给对应的读写事件处理器（Event Handler）
         事件分发器有两种设计模式：Reactor 和 Proactor，Reactor 采用同步 I/O， Proactor 采用异步 I/O
 ![image](https://user-images.githubusercontent.com/41152743/141888994-7c115d9b-f4c4-4fd3-a3e3-c1234869cc23.png)
@@ -77,4 +77,142 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
 
     5. 异步 I/O
         从内核缓冲区拷贝数据到用户态缓冲区的过程也是由系统异步完成，应用进程只需要在指定的数组中引用数据即可
+### 3.2 网络框架   
+    Netty 和 Tomcat 最大的区别在于对通信协议的支持。
+    1. Tomcat 是一个 HTTP Server，它主要解决 HTTP 协议层的传输；
+        Netty 不仅支持 HTTP 协议，还支持 SSH、TLS/SSL 等多种应用层的协议，而且能够自定义应用层协议；
+    2. Tomcat需要遵循 Servlet 规范，在 Servlet 3.0 之前采用的是同步阻塞模型，Tomcat 6.x 版本之后已经支持 NIO，性能得到较大提升;
+       Netty不需要受到Servlet规范的约束，可以最大化发挥 NIO 特性。
+    3. 仅需HTTP服务器，推荐使用Tomcat；面向TCP网络的应用开发，推荐使用Netty
+### 3.3 逻辑架构
+![image](https://user-images.githubusercontent.com/41152743/141937073-0c5c4d29-b918-489d-89c1-d7588e797230.png)
+
+典型网络分层架构设计，共分为网络通信层、事件调度层、服务编排层。
+
+1. 网络通信层
+
+    1.1 BootStrap&ServerBootStrap：负责整个Netty的启动、初始化、服务器连接等过程。
+    
+        Bootstrap用于客户端引导用于连接远端服务器，只绑定一个 EventLoopGroup。
+        ServerBootStrap用于服务端绑定本地端口，绑定两个EventLoopGroup，通常称为 Boss 和 Worker。Boss 会不停地接收新的连接，然后将连接分配给一个个 Worker 处理连接。
+    1.2 Channel:供了基本的 API 用于网络 I/O 操作,如 register、bind、connect、read、write、flush 等。AbstractChannel 是整个家族的基类，主要实现类包括：
+    
+        NioServerSocketChannel(EpollServerSocketChannel)： 异步 TCP 服务端。
+        NioSocketChannel： 异步 TCP 客户端。
+        OioServerSocketChannel: 同步 TCP 服务端。
+        OioSocketChannel: 同步 TCP 客户端。
+        NioDatagramChannel: 异步 UDP 连接。
+        OioDatagramChannel: 同步 UDP 连接
+     channel事件回调状态：
+![image](https://user-images.githubusercontent.com/41152743/141942977-e8db6e77-ef33-44af-9dee-eab489738588.png)
+
+具体配置示例如下：
+
+       public void start() {
+        synchronized (waitLock) {
+            //1. 配置线程池
+            initEventPool();
+            ServerBootstrap bootstrap = new ServerBootstrap();
+
+           
+            bootstrap.group(bossGroup, workGroup)
+            //2.channel初始化
+             //2.1 设置channel类型
+                    .channel(useEpoll() ? EpollServerSocketChannel.class : NioServerSocketChannel.class)
+            //2.2 设置channel参数-option 主要负责设置 Boss 线程组
+                    .option(ChannelOption.SO_REUSEADDR, nettyParam.isReuseaddr())
+                    .option(ChannelOption.SO_BACKLOG, nettyParam.getBacklog())
+                    .option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
+                    .option(ChannelOption.SO_RCVBUF, nettyParam.getRevbuf())
+            //2.3 注册 ChannelHandler
+                     .childHandler(new ChannelInitializer<SocketChannel>() {
+                        @Override
+                        protected void initChannel(SocketChannel ch) {
+                            initHandler(ch.pipeline(), nettyParam);
+                        }
+                    })
+            //2.2 设置channel参数， childOption 对应的是 Worker 线程组。
+                    .childOption(ChannelOption.TCP_NODELAY, nettyParam.isNodelay())
+                    .childOption(ChannelOption.SO_KEEPALIVE, nettyParam.isKeepAlive())
+                    .childOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT);
+            //3. 端口绑定
+            bootstrap.bind(UniqueIpUtils.getHost(), nettyParam.getWebPort()).addListener((ChannelFutureListener) channelFuture -> {
+                if (channelFuture.isSuccess()) {
+                    log.info("服务端启动成");                 
+                } else {
+                
+                }
+            });
+        }
+    }
+其中具体的channel属性如下：
+![image](https://user-images.githubusercontent.com/41152743/141976727-00909ca9-b4b9-409d-9db4-83e58c124094.png)
+
+    public  void initHandler(ChannelPipeline channelPipeline, NettyParam nettyParam){
+        intProtocolHandler(channelPipeline,nettyParam);
+       //netty的心跳机制
+        /**
+         * 在服务器端会根据读空闲时间来检查一下channelRead方法被调用的情况，
+         * 如果在该时间内的channelRead()方法都没有被触发，
+         * 就会调用userEventTriggered()方法
+         */
+        channelPipeline.addLast(new IdleStateHandler(readerIdleTimeSeconds,writerIdleTimeSeconds,allIdleTimeSeconds));
+
+        //自定义业务逻辑处理器-文本消息处理器
+        channelPipeline.addLast(new DefaultAbstractHandler());
+    }
+    
+     private  void intProtocolHandler(ChannelPipeline channelPipeline, NettyParam nettyParam){
+        //http编码器
+        channelPipeline.addLast(BootstrapConstant.HTTP_CODE, new HttpServerCodec());
+
+        //HTTP消息聚合
+        channelPipeline.addLast(BootstrapConstant.AGGREGATOR, new HttpObjectAggregator(nettyParam.getMaxContext()));
+
+        //分块发送数据，防止发送大文件导致内存溢出
+        channelPipeline.addLast(BootstrapConstant.CHUNKED_WRITE,new ChunkedWriteHandler());
+
+        /**
+         *   WebSocketServerProtocolHandler处理器
+         *   处理了webSocket 协议的握手请求处理，以及 Close、Ping、Pong控制帧的处理
+         */
+        channelPipeline.addLast(BootstrapConstant.WEB_SOCKET_HANDLER,new WebSocketServerProtocolHandler(nettyParam.getWebSocketPath()));
+    }
+    
+    
+2. 事件调度层：负责监听网络连接和读写操作，然后触发各种类型的网络事件
+
+    采用Reactor 线程模型对各类事件进行聚合处理，
+    通过 Selector 主循环线程集成多种事件（ I/O 事件、信号事件、定时事件等），
+    实际的业务处理逻辑是交由服务编排层中相关的 Handler 完成。
+    
+    2.1 EventLoopGroup & EventLoop：EventLoopGroup本质是一个线程池，负责接收I/O请求，并分配线程执行请求。
         
+        1. 一个 EventLoopGroup 往往包含一个或者多个 EventLoop，EventLoop 用于处理 Channel 生命周期内的所有 I/O 事件，如 accept、connect、read、write 等 I/O 事件。
+        2. EventLoop 同一时间会与一个线程绑定，每个 EventLoop 负责处理多个 Channel。
+        3. 每新建一个 Channel，EventLoopGroup 会选择一个 EventLoop 与其绑定。该 Channel 在生命周期内都可以对 EventLoop 进行多次绑定和解绑。
+    NioEventLoopGroup 也是 Netty 中最被推荐使用的线程模型，与Reactor线程模型的对应：
+        
+        1. 单线程模型：EventLoopGroup 只包含一个 EventLoop，Boss 和 Worker 使用同一个EventLoopGroup；
+        2. 多线程模型：EventLoopGroup 包含多个 EventLoop，Boss 和 Worker 使用同一个EventLoopGroup；
+        3. 主从多线程模型：EventLoopGroup 包含多个 EventLoop，Boss 是主 Reactor，Worker 是从 Reactor，它们分别使用不同的 EventLoopGroup，主 Reactor 负责新的网络连接 Channel 创建，然后把 Channel 注册到从 Reactor。
+
+3. 服务编排层：负责组装各类服务，它是 Netty 的核心处理链，用以实现网络事件的动态编排和有序传播
+
+    3.1 ChannelPipeline：负责组装各种 ChannelHandler，实际数据的编解码以及加工处理操作都是由 ChannelHandler 完成的
+    
+        1. 可以理解为ChannelHandler 的实例列表——内部通过双向链表将不同的 ChannelHandler 链接在一起；
+        2. 当 I/O 读写事件触发时，ChannelPipeline 会依次调用 ChannelHandler 列表对 Channel 的数据进行拦截和处理；
+        3. ChannelPipeline 是线程安全的，因为每一个新的 Channel 都会对应绑定一个新的 ChannelPipeline，一个 ChannelPipeline 关联一个 EventLoop，一个 EventLoop 仅会绑定一个线程。
+        4. ChannelPipeline 中包含入站 ChannelInboundHandler 和出站 ChannelOutboundHandler 两种处理器，客户端和服务端一次完整的请求应答过程可以分为三个步骤：
+            客户端出站（请求数据）、服务端入站（解析数据并执行业务逻辑）、服务端出站（响应结果）。
+    3.2 ChannelHandler & ChannelHandlerContext：数据的编解码以及加工处理操作都是由 ChannelHandler 完成的
+        
+        1. ChannelHandlerContext 用于保存 ChannelHandler 上下文，通过它可以知道ChannelPipeline 和 ChannelHandler 的关联关系。
+        2. ChannelHandlerContext 可以实现 ChannelHandler 之间的交互，包含了 ChannelHandler 生命周期的所有事件
+
+![image](https://user-images.githubusercontent.com/41152743/141957515-bbf2a0aa-52c0-4a60-887d-df3dedf06bd6.png)
+
+
+
+
