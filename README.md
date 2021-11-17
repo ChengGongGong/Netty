@@ -207,11 +207,12 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
             每当事件发生时，应用程序都会将产生的事件放入事件队列当中，然后 EventLoop 会轮询从队列中取出事件执行或者将事件分发给相应的事件监听者执行。
             事件执行的方式通常分为立即执行、延后执行、定期执行几种。
    2.3 NioEventLoop：主要负责处理 I/O 事件、普通任务和定时任务。
-   io.netty.util.concurrent.SingleThreadEventExecutor#execute(java.lang.Runnable, boolean)-添加任务
-   io.netty.channel.nio.NioEventLoop#run-具体逻辑处理
+        io.netty.util.concurrent.SingleThreadEventExecutor#execute(java.lang.Runnable, boolean)-添加任务
+        io.netty.channel.nio.NioEventLoop#run-(事件轮询、事件分发、任务处理)
       1. 事件处理机制：无锁串行化的设计思路
-        Channel 生命周期的所有事件处理都是线程独立的，不同的 NioEventLoop 线程之间不会发生任何交集。
-        完成数据读取后，会调用绑定的 ChannelPipeline 进行事件传播，依次传递给ChannelHandler，加工完成后传递给下一个，整个过程串行化执行，不会发生线程上下文切换的问题。
+      
+            Channel 生命周期的所有事件处理都是线程独立的，不同的 NioEventLoop 线程之间不会发生任何交集。
+            完成数据读取后，会调用绑定的 ChannelPipeline 进行事件传播，依次传递给ChannelHandler，加工完成后传递给下一个，整个过程串行化执行，不会发生线程上下文切换的问题。
         
        缺点：
             不能执行时间过长的 I/O 操作，一旦某个 I/O 事件发生阻塞，那么后续的所有 I/O 事件都无法执行，甚至造成事件积压
