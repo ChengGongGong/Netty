@@ -209,8 +209,10 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
 
 
    2.3 NioEventLoop：主要负责处理 I/O 事件、普通任务和定时任务。
+   
         io.netty.util.concurrent.SingleThreadEventExecutor#execute(java.lang.Runnable, boolean)-添加任务
         io.netty.channel.nio.NioEventLoop#run-(事件轮询、事件分发、任务处理)
+        
       1. 事件处理机制：无锁串行化的设计思路
  ![image](https://user-images.githubusercontent.com/41152743/142127529-07cb44a0-b173-463e-96a5-82f5d78d8e6a.png)
  
