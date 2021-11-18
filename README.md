@@ -219,7 +219,7 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
             Channel 生命周期的所有事件处理都是线程独立的，不同的 NioEventLoop 线程之间不会发生任何交集。
             完成数据读取后，会调用绑定的 ChannelPipeline 进行事件传播，依次传递给ChannelHandler，加工完成后传递给下一个，整个过程串行化执行，不会发生线程上下文切换的问题。
         
-       缺点：
+       缺点：  
             不能执行时间过长的 I/O 操作，一旦某个 I/O 事件发生阻塞，那么后续的所有 I/O 事件都无法执行，甚至造成事件积压
             
       2. 任务处理机制：兼顾执行任务队列中的任务，遵循FIFO规则，保证任务执行的公平性，分为普通任务、定时任务、尾部队列
@@ -235,19 +235,107 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
             3. 不宜设计过多的 ChannelHandler。          
 3. 服务编排层：负责组装各类服务，它是 Netty 的核心处理链，用以实现网络事件的动态编排和有序传播
 
-    3.1 ChannelPipeline：负责组装各种 ChannelHandler，实际数据的编解码以及加工处理操作都是由 ChannelHandler 完成的
+    3.1 ChannelPipeline：负责组装各种 ChannelHandler，用以实现网络事件的动态编排和有序传播
+ ![image](https://user-images.githubusercontent.com/41152743/142147501-d70c123f-9aff-4afe-a548-b61a9a34ee4f.png)
     
         1. 可以理解为ChannelHandler 的实例列表——内部通过双向链表将不同的 ChannelHandler 链接在一起；
         2. 当 I/O 读写事件触发时，ChannelPipeline 会依次调用 ChannelHandler 列表对 Channel 的数据进行拦截和处理；
         3. ChannelPipeline 是线程安全的，因为每一个新的 Channel 都会对应绑定一个新的 ChannelPipeline，一个 ChannelPipeline 关联一个 EventLoop，一个 EventLoop 仅会绑定一个线程。
         4. ChannelPipeline 中包含入站 ChannelInboundHandler 和出站 ChannelOutboundHandler 两种处理器，客户端和服务端一次完整的请求应答过程可以分为三个步骤：
             客户端出站（请求数据）、服务端入站（解析数据并执行业务逻辑）、服务端出站（响应结果）。
+        5. ChannelPipeline 的双向链表分别维护了 HeadContext 和 TailContext 的头尾节点，自定义的ChannelHandler在Head和Tail之间。
+           1. HeadContext 既是 Inbound 处理器，也是 Outbound 处理器，作为头节点负责读取数据并开始传递 InBound 事件，数据处理完成后，会反方向经过 Outbound 处理器，最终传递到 HeadContext；
+           2. TailContext 只实现了 ChannelInboundHandler 接口，用于终止InBound事件传播，作为 OutBound 事件传播的第一站，仅仅是将 OutBound 事件传递给上一个节点。
+           3. Inbound 事件的传播方向为 Head -> Tail，而 Outbound 事件传播方向是 Tail -> Head。
     3.2 ChannelHandler & ChannelHandlerContext：数据的编解码以及加工处理操作都是由 ChannelHandler 完成的
-        
-        1. ChannelHandlerContext 用于保存 ChannelHandler 上下文，通过它可以知道ChannelPipeline 和 ChannelHandler 的关联关系。
-        2. ChannelHandlerContext 可以实现 ChannelHandler 之间的交互，包含了 ChannelHandler 生命周期的所有事件
+
+        1. ChannelHandler 有两个重要的子接口：ChannelInboundHandler和ChannelOutboundHandler，分别拦截入站和出站的各种 I/O 事件
+             ChannelInboundHandler 的事件回调方法与触发时机如下：
+![image](https://user-images.githubusercontent.com/41152743/142152317-a1204fd6-e036-4368-b4e1-cf7cd56984a5.png) 
+
+                ChannelOutboundHandler的事件回调方法与触发时机如下：
+                
+![image](https://user-images.githubusercontent.com/41152743/142153557-45cb157b-503d-4c6b-a718-5967191bf792.png)
+
+        2. ChannelHandler异常处理：
+            异常事件的处理顺序与 ChannelHandler 的添加顺序相同，会依次向后传播；
+            如果用户没有对异常进行拦截处理，最后将由 Tail 节点统一处理。DefaultChannelPipeline#onUnhandledInboundException
+            异常处理最佳实践：在 ChannelPipeline 自定义处理器的末端添加统一的异常处理器。
+        3. ChannelHandlerContext 用于保存 ChannelHandler 上下文，通过它可以知道ChannelPipeline 和 ChannelHandler 的关联关系。
+        4. ChannelHandlerContext 可以实现 ChannelHandler 之间的交互，包含了 ChannelHandler 生命周期的所有事件
 
 ![image](https://user-images.githubusercontent.com/41152743/141957515-bbf2a0aa-52c0-4a60-887d-df3dedf06bd6.png)
+
+### 3.4 拆包/粘包
+#### 1.拆包/粘包
+       网络通信的过程中，每次可以发送的数据包大小是受多种因素限制的(MTU 最大传输单元、MSS 最大分段大小、滑动窗口)，
+        如果一次传输的网络包数据大小超过传输单元大小，那么我们的数据可能会拆分为多个数据包发送出去；
+        如果每次请求的网络包数据都很小，一共请求了 10000 次，TCP 并不会分别发送 10000 次。因为 TCP 采用的 Nagle 算法对此作出了优化。
+ 1. MTU 最大传输单元和 MSS 最大分段大小
+ ![image](https://user-images.githubusercontent.com/41152743/142165758-d4e8559c-2f61-439f-a027-fa813c0161e7.png)
+
+        MTU（Maxitum Transmission Unit）：最大传输单元，链路层一次最大传输数据的大小，一般来说大小为 1500 byte
+        MSS（Maximum Segement Size）：最大分段大小，指 TCP 最大报文段长度，它是传输层一次发送最大数据的大小。
+        计算关系：MSS = MTU - IP 首部 - TCP首部
+        拆包：如果MSS + TCP 首部 + IP 首部 > MTU，那么数据包将会被拆分为多个发送，这就是拆包现象。
+2.滑动窗口
+
+        TCP 传输层用于流量控制的一种有效措施，是指数据接收方设置的窗口大小，随后接收方会把窗口大小告诉发送方，以此限制发送方每次发送数据的大小，从而达到流量控制的目的。
+        因此，数据发送方不需要每发送一组数据就阻塞等待接收方确认，允许发送方同时发送多个数据分组，每次发送的数据都会被限制在窗口大小内；
+        TCP 并不会为每个报文段都回复 ACK 响应，它会对多个报文段回复一次 ACK，如果在一定时间范围内未收到某个报文段，将会丢弃其他报文段，发送方会发起重试。
+3. Nagle 算法
+
+         TCP/IP 拥塞控制方法，主要用于解决频繁发送小数据包而带来的网络拥塞问题。
+         思路：在数据未得到确认之前先写入缓冲区，等待数据确认或者缓冲区积攒到一定大小再把数据包发送出去。
+         Linux 在默认情况下是开启 Nagle 算法的，在大量小数据包的场景下可以有效地降低网络开销，Netty 中为了使数据传输延迟最小化，就默认禁用了 Nagle 算法。
+4. 拆包/粘包
+    原因：
+    
+        1. 应用程序写入的数据大于套接字缓冲区大小，这将会发生拆包；
+        2. 如果MSS + TCP 首部 + IP 首部 > MTU，那么数据包将会被拆分为多个发送，会发生拆包
+        3. 应用程序写入数据小于套接字缓冲区大小，将多次写入缓冲区的数据一次发送出去，这将会发生粘包。
+        4. 接收方法不及时读取套接字缓冲区数据，这将发生粘包。
+    解决方案：提供一种机制来识别数据包的界限，定义应用层的通信协议。
+        
+        1. 消息长度固定：每个数据报文都需要一个固定的长度，当发送方的数据小于固定长度时，则需要空位补齐。
+            缺点：无法很好设定固定长度的值，如果长度太大会造成字节浪费，长度太小又会影响消息传输 
+        2. 特定分隔符：在每次发送报文的尾部加上特定分隔符，接收方就可以根据特殊分隔符进行消息拆分
+            分隔符的选择一定要避免和消息体中字符相同，以免冲突，通常将消息进行编码，然后选择编码字符之外的字符作为特定分隔符。
+            特定分隔符在消息协议足够简单的场景下比较高效，例如redis在通信过程中采用换行分隔符
+        3. 消息长度+消息内容：消息头中存放消息的总长度，接收方在解析数据时，首先读取消息头的长度字段 Len，然后紧接着读取长度为 Len 的字节数据，该数据即判定为一个完整的数据报文
+            使用方式灵活，此外消息头中还可以自定义其他必要的扩展字段，例如消息版本、算法类型等。
+ #### 2.自定义协议通信
+    1. 一个完备的网络协议需要具备的基本要素：
+    
+        1. 魔数：通信双方协商的一个暗号，通常采用固定的几个字节表示，防止任何人随便向服务器的端口上发送数据。接收到数据后会解析出前几个固定字节的魔数，然后做正确性比对。
+        2. 协议版本号:随着需求变化，不同版本的协议对应的解析方法也是不同的；
+        3. 序列化算法：数据发送方应该采用何种方法将请求的对象转化为二进制，以及如何再将二进制转化为对象；
+        4. 报文类型：在不同的业务场景中，报文可能存在不同的类型。
+        5. 长度域字段：代表请求数据的长度，接收方根据长度域字段获取一个完整的报文。
+        6. 请求数据：通常为序列化之后得到的二进制流，每种请求数据的内容是不一样的。
+        7. 状态：标识请求是否正常;
+        8. 保留字段: 可选项，为了应对协议升级的可能性，可以预留若干字节的保留字段，以备不时之需
+    2. Netty中的编码器和解码器
+    
+        1. 一次编解码器：MessageToByteEncoder/ByteToMessageDecoder，用于解决TCP拆包/粘包问题；
+        2. 二次编解码器：MessageToMessageEncoder/MessageToMessageDecoder，对解析后的字节数据做对象模型的转换
+        3. MessageToByteEncoder：io.netty.handler.codec.MessageToByteEncoder#write，编码器实现非常简单，不需要关注拆包/粘包问题。
+        4. ByteToMessageDecoder：io.netty.handler.codec.ByteToMessageDecoder#decode，需要传入接收的数据ByteBuf及用来添加编码后消息的 List。
+            由于 TCP 粘包问题，ByteBuf 中可能包含多个有效的报文，或者不够一个完整的报文，Netty 会重复回调 decode() 方法，直到没有解码出新的完整报文可以添加到 List 当中；
+            或者 ByteBuf 没有更多可读取的数据为止，如果此时 List 的内容不为空，传递给下一个ChannelInboundHandler。
+            io.netty.handler.codec.ByteToMessageDecoder#decodeLast：在 Channel 关闭后会被调用一次，主要用于处理 ByteBuf 最后剩余的字节数据
+            ReplayingDecoder:ByteToMessageDecoder的抽象子类，封装了缓冲区的管理，在读取缓冲区数据时，无须再对字节长度进行检查，因为没有足够长度的字节数据，ReplayingDecoder 将终止解码操作。
+
+
+
+
+
+
+
+
+
+
+
 
 
 
