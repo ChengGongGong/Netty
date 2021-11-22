@@ -305,7 +305,7 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
         3. 消息长度+消息内容：消息头中存放消息的总长度，接收方在解析数据时，首先读取消息头的长度字段 Len，然后紧接着读取长度为 Len 的字节数据，该数据即判定为一个完整的数据报文
             使用方式灵活，此外消息头中还可以自定义其他必要的扩展字段，例如消息版本、算法类型等。
  #### 2.自定义协议通信
-    1. 一个完备的网络协议需要具备的基本要素：
+ 1. 一个完备的网络协议需要具备的基本要素：
     
         1. 魔数：通信双方协商的一个暗号，通常采用固定的几个字节表示，防止任何人随便向服务器的端口上发送数据。接收到数据后会解析出前几个固定字节的魔数，然后做正确性比对。
         2. 协议版本号:随着需求变化，不同版本的协议对应的解析方法也是不同的；
@@ -315,7 +315,7 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
         6. 请求数据：通常为序列化之后得到的二进制流，每种请求数据的内容是不一样的。
         7. 状态：标识请求是否正常;
         8. 保留字段: 可选项，为了应对协议升级的可能性，可以预留若干字节的保留字段，以备不时之需
-    2. Netty中的编码器和解码器
+2. Netty中的编码器和解码器
     
         1. 一次编解码器：MessageToByteEncoder/ByteToMessageDecoder，用于解决TCP拆包/粘包问题；
         2. 二次编解码器：MessageToMessageEncoder/MessageToMessageDecoder，对解析后的字节数据做对象模型的转换
@@ -325,17 +325,118 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
             或者 ByteBuf 没有更多可读取的数据为止，如果此时 List 的内容不为空，传递给下一个ChannelInboundHandler。
             io.netty.handler.codec.ByteToMessageDecoder#decodeLast：在 Channel 关闭后会被调用一次，主要用于处理 ByteBuf 最后剩余的字节数据
             ReplayingDecoder:ByteToMessageDecoder的抽象子类，封装了缓冲区的管理，在读取缓冲区数据时，无须再对字节长度进行检查，因为没有足够长度的字节数据，ReplayingDecoder 将终止解码操作。
-
-
-
-
-
-
-
-
-
-
-
+3. Netty支持的常用解码器
+        
+        1. 固定长度解码器 FixedLengthFrameDecoder：通过构造函数设置固定长度的大小 frameLength，无论接收方一次获取多大的数据，都会严格按照 frameLength 进行解码；
+        2. 特殊分隔符解码器 DelimiterBasedFrameDecoder
+            delimiters：指定特殊分隔符，通过写入 ByteBuf 作为参数传入，如果指定的多个分隔符为 \n 和 \r\n，DelimiterBasedFrameDecoder 会退化成使用 LineBasedFrameDecoder 进行解析；
+            maxLength：报文最大长度的限制，如果超过 maxLength 还没有检测到指定分隔符，将会抛出 TooLongFrameException
+            failFast：设置 failFast 可以控制抛出 TooLongFrameException 的时机，
+                如果 failFast=true，那么在超出 maxLength 会立即抛出 TooLongFrameException，不再继续进行解码。
+                如果 failFast=false，那么会等到解码出一个完整的消息后才会抛出 TooLongFrameException。
+            stripDelimiter：判断解码后得到的消息是否去除分隔符。
+        3. 长度域解码器 LengthFieldBasedFrameDecoder：解决 TCP 拆包/粘包问题最常用的解码器
+            特有属性：
+![image](https://user-images.githubusercontent.com/41152743/142339106-f03aa0f8-8908-4449-a526-9042405d61f6.png)
+            与固定长度解码器和特定分隔符解码器相似的属性：
+![image](https://user-images.githubusercontent.com/41152743/142339189-fc883439-da5c-41ec-baeb-248e3cdc2eeb.png)
+            具体使用示例：io.netty.handler.codec.LengthFieldBasedFrameDecoder
+            
+                1. 典型的基于消息长度 + 消息内容的解码：
+                2. 解码结果需要截断。
+                3. 长度字段包含消息长度和消息内容所占的字节。
+                4. 基于长度字段偏移的解码。
+                5. 长度字段与内容字段不再相邻。
+                6. 基于长度偏移和长度修正的解码。
+                7. 长度字段包含除 Content 外的多个其他字段。
+ 3. writeAndFlush 事件传播分析
+ 
+        1. 属于出站操作，从channlPipeline的Tail节点开始进行事件传播，一直向前传播到 Head 节点。
+            context.channel().writeAndFlush()->
+            io.netty.channel.AbstractChannel#writeAndFlush(java.lang.Object)->
+            io.netty.channel.DefaultChannelPipeline#writeAndFlush(java.lang.Object)->
+            io.netty.channel.AbstractChannelHandlerContext#write():TailContext
+                AbstractChannelHandlerContext 会默认初始化一个 ChannelPromise 完成该异步操作，ChannelPromise 内部持有当前的 Channel 和 EventLoop，
+                此外还 ChannelPromise 中注册回调监听 listener 来获得异步操作的结果。
+        2. 核心步骤：
+            1. findContextOutbound():找到 Pipeline 链表中下一个 Outbound 类型的 ChannelHandler，直到 Head 节点结束。
+            2. inEventLoop()：判断当前线程的身份标识，如果当前线程和 EventLoop 分配给当前 Channel 的线程是同一个线程的话，那么所提交的任务将被立即执行；
+                否则当前的操作将被封装成一个 Task 放入到 EventLoop 的任务队列，稍后执行；
+            3. next.invokeWriteAndFlush(m, promise) ，它会执行下一个 ChannelHandler 节点的 write 方法，重复执行 write 方法，继续寻找下一个 Outbound 节点。
+        3. 写Buffer队列：io.netty.channel.DefaultChannelPipeline.HeadContext#write
+            1. 数据将会在 Pipeline 中一直寻找 Outbound 节点并向前传播，直到 Head 节点结束，由 Head 节点完成最后的数据发送。       
+                首先，对message进行过滤，如果使用的不是 DirectByteBuf，那么它会将 msg 转换成 DirectByteBuf；
+                然后，将数据缓存在 ChannelOutboundBuffer 的缓存内，每次传入的数据被封装成一个Entry对象添加到链表中。
+                    第一个被写到缓冲区的节点 flushedEntry、第一个未被写到缓冲区的节点 unflushedEntry和最后一个节点 tailEntry。
+        4. 刷新Buffer队列：io.netty.channel.DefaultChannelPipeline.HeadContext#flush
+            1. 首先将ChannelOutboundBuffer 的缓存内的unflushedEntry数据刷新到flushedEntry中；
+            2. io.netty.channel.nio.AbstractNioByteChannel#doWrite，根据设置的自旋次数，将数据真正写入到Socket缓冲区。
+### 3.5 内存管理
+#### 1. 堆外内存
+    1. 堆内内存由 JVM GC 自动回收内存，但是GC 是需要时间开销成本的，堆外内存由于不受 JVM 管理；
+    2. 堆外内存需要手动释放，当出现内存泄漏问题时排查起来会相对困难；
+    3. 当进行网络 I/O 操作、文件读写时，堆内内存都需要转换为堆外内存，直接使用堆外内存可以减少一次内存拷贝；
+    4. 堆外内存可以实现进程之间、JVM 多实例之间的数据共享。
+1. Java 中堆外内存的分配方式有两种：ByteBuffer#allocateDirect和Unsafe#allocateMemory
+        
+        1.ByteBuffer#allocateDirect：调用的是DirectByteBuffer 构造函数，通过 ByteBuffer 分配的堆外内存不需要手动回收，它可以被 JVM 自动回收。
+            回收：
+                1.  -XX:MaxDirectMemorySize 指定堆外内存的上限大小，当超过其大小时，触发一次Full GC进行清理回收，如果在 Full GC 之后还是无法满足堆外内存的分配，那么程序将会抛出 OOM 异常。
+                2.  ByteBuffer.allocateDirect 分配的过程中，在 Bits.reserveMemory 方法中也会主动调用 System.gc() 强制执行 Full GC，但是在生产环境一般都是设置了 -XX:+DisableExplicitGC，System.gc() 是不起作用的。
+           回收原理：
+               1. DirectByteBuffer初始化时,包含堆外内存的地址、大小以及 Cleaner 对象的引用。其中 Cleaner 对象是虚引用PhantomReference 的子类，配合引用队列ReferenceQueue 联合使用;
+               2. 当发生 GC 时，DirectByteBuffer 对象被回收，此时 Cleaner 对象不再有任何引用关系；
+               3. 此时Cleaner对象会被JVM挂到PendingList上，然后有一个固定的线程扫描这个List，遇到Cleaner对象就执行 clean() 方法，将该将 Cleaner 对象从 Cleaner 链表中移除，然后调用unsafe.freeMemory 方法清理堆外内存。
+                
+        2.Unsafe#allocateMemory ：所分配的内存必须自己手动释放，否则会造成内存泄漏，unsafe.freeMemory(address)。
+2. Netty分配堆外内存的方式：ByteBuf
+    
+        1.  ByteBuffer 的基本属性:mark <= position <= limit <= capacity。
+                mark：为某个读取过的关键位置做标记，方便回退到该位置；
+                position：当前读取的位置；
+                limit：buffer 中有效的数据长度大小；
+                capacity：初始化时的空间容量。
+           缺点：
+                1. 分配的长度是固定的，无法动态扩缩容；
+                2. 只能通过 position 获取当前可操作的位置，需要频繁调用 flip、rewind 方法切换读写状态
+          ByteBuf的优势：
+                1. 容量可以按需动态扩展，类似于 StringBuffer；
+                2. 读写采用了不同的指针，读写模式可以随意切换；
+                3. 通过内置的复合缓冲类型可以实现零拷贝；
+                4. 支持引用计数、缓存池
+        2. ByteBuf简介
+            1. 内部结构:读指针 readerIndex、写指针 writeIndex、最大容量 maxCapacity
+   ![image](https://user-images.githubusercontent.com/41152743/142405657-364957d3-1b80-49ae-b01d-b823e1b99736.png)
+            
+                废弃字节：已经丢弃的无效字节数据；
+                可读字节：通过 writeIndex - readerIndex 计算，表示可以被读取的字节内容，当 readerIndex == writeIndex 时，表示 ByteBuf 已经不可读。
+                可写字节: 写入数据都会存储到可写字节区域，当 writeIndex 超过 capacity，表示 ByteBuf 容量不足，需要扩容。
+                可扩容字节：最多还可以扩容多少字节，超过 maxCapacity 再写入就会出错。
+           2. 引用计数
+                实现了 ReferenceCounted 接口，ByteBuf 的生命周期是由引用计数所管理。
+                只要引用计数大于 0，表示 ByteBuf 还在被使用；当 ByteBuf 不再被其他对象所引用时，引用计数为 0，那么代表该对象可以被释放。
+                此外，当引用计数为 0，该 ByteBuf 可以被放入到对象池中，避免每次使用 ByteBuf 都重复创建；
+                可以利用引用计数的特点实现内存泄漏检测工具，Netty 会对分配的 ByteBuf 进行抽样分析，检测 ByteBuf 是否已经不可达且引用计数大于 0，判定内存泄漏的位置并输出到日志中，
+                    需要关注日志中 LEAK 关键字。
+           3. 分类
+                1. Heap/Direct 就是堆内和堆外内存：Heap 指的是在 JVM 堆内分配，底层依赖的是字节数据，Direct 则是堆外内存，不受 JVM 限制，分配方式依赖 JDK 底层的 ByteBuffer。
+                2. Pooled/Unpooled 表示池化还是非池化内存：
+                    Pooled 是从预先分配好的内存中取出，使用完可以放回 ByteBuf 内存池，等待下一次分配；
+                    Unpooled 是直接调用系统 API 去申请内存，确保能够被 JVM GC 管理回收。
+                3. Unsafe/非 Unsafe 的区别在于操作方式是否安全：
+                    Unsafe 表示每次调用 JDK 的 Unsafe 对象操作物理内存，依赖 offset + index 的方式操作数据；
+                    非 Unsafe 则不需要依赖 JDK 的 Unsafe 对象，直接通过数组下标的方式操作数据。
+           4. 核心API
+                1. 指针操作 API
+                    readerIndex() & writeIndex()：返回当前读写指针的位置；
+                    markReaderIndex() & resetReaderIndex()：用于保存 readerIndex 的位置、将当前 readerIndex 重置为之前保存的位置。
+                2. 数据读写 API
+                    isReadable()、readableBytes()等
+                3. 内存管理API
+                    release() & retain()：引用计数的增减；
+                    slice() & duplicate()：前者默认截取 readerIndex 到 writerIndex 之间的数据，后者截取的是整个原始 ByteBuf 信息
+                    copy()：从原始的 ByteBuf 中拷贝所有信息，所有数据都是独立的
+        
 
 
 
