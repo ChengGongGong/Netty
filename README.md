@@ -436,7 +436,8 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
                     release() & retain()：引用计数的增减；
                     slice() & duplicate()：前者默认截取 readerIndex 到 writerIndex 之间的数据，后者截取的是整个原始 ByteBuf 信息
                     copy()：从原始的 ByteBuf 中拷贝所有信息，所有数据都是独立的
-        
+ #### 2. 内存分配器
+    changy
 
 
 
