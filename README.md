@@ -518,6 +518,10 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
  ![image](https://user-images.githubusercontent.com/41152743/142994043-dd82a1ff-c780-46c2-9576-4b3375ab0ab4.png)
         
         1. PoolSubpage 数组：用于分配小于 8K 的内存，存放Tiny 和 Small 类型的内存块，采用向上取整的方式分配节点进行分配；
+            
+            1. PoolSubpage 通过位图 bitmap 记录子内存是否已经被使用，bit 的取值为 0 或者 1;
+            2. PoolArena 在创建是会初始化smallSubpagePools，分配内存时从PoolChunk中找到一个 PoolSubpage 节点,并进行等分8k/分配的内存，然后找到这个节点对应的PoolArea，
+            将这个 PoolSubpage 节点与smallSubpagePools[1]对应的head节点连接组成双向链表，下次再分配同样规格的内存时，查找PoolArea中的smallSubpagePools是否存在可用的PoolSubpage。
         2. PoolChunkList：用于存储不同利用率的Chunk，构成一个双向循环链表。
         
             qInit，内存使用率为 0 ~ 25% 的 Chunk，用于存储初始化分配的PoolChunk,即使内存被完全释放也不会被回收，避免PoolChunk的重复初始化工作。
@@ -531,4 +535,48 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
             2. 每个 PoolChunkList 都有内存使用率的上下限：minUsage 和 maxUsage，如果使用率超过 maxUsage，那么会从当前 PoolChunkList 移除，并移动到下一个；
                 如果使用率小于 minUsage，那么 PoolChunk 会从当前 PoolChunkList 移除，并移动到前一个。
             3.如果 PoolChunk 的使用率一直处于临界值，会导致 PoolChunk 在两个 PoolChunkList 不断移动，造成性能损耗。
-       3. Poll
+   2. PoolChunk：真正存储内存数据的地方，每个 PoolChunk 的默认大小为 16M，Netty的内存分配和回收基于 PoolChunk 完成的
+        
+            1. 理解为 Page 的集合，每个子内存块采用 PoolSubpage 表示。
+            2. 使用伙伴算法将 每个PoolChunk 分配成 2048 个 Page，最终形成一颗满二叉树，二叉树中所有子节点的内存都属于其父节点管理
+   3. PoolThreadCache & MemoryRegionCache
+            
+            1. PoolThreadCache：本地线程缓存，缓存 Tiny、Small、Normal 三种类型的数据
+                内存释放时，并没有将缓存归还给 PoolChunk，而是使用 PoolThreadCache 缓存起来，当下次有同样规格的内存分配时，直接从 PoolThreadCache 取出使用即可。
+            2. MemoryRegionCache：实际上是一个队列，当内存释放时，将内存块加入到队列中，下次再分配同样规格的内存时，直接从队列中取出空闲的内存块。
+3. 内存分配实现原理
+
+io.netty.buffer.PoolChunk#allocate：
+
+    1. 分配内存大于 8K 时，PoolChunk 中采用的 Page 级别的内存分配策略。
+    2. 分配内存小于 8K 时，由 PoolSubpage 负责管理的内存分配策略。
+    3. 分配内存小于 8K 时，为了提高内存分配效率，由 PoolThreadCache 本地线程缓存提供的内存分配。io.netty.buffer.PoolArena#allocate(io.netty.buffer.PoolThreadCache, io.netty.buffer.PooledByteBuf<T>, int)
+    
+ 4. 内存回收实现原理
+ 
+ io.netty.buffer.PoolThreadCache#allocate
+ 
+    当用户线程释放内存时会将内存块缓存到本地线程的私有缓存 PoolThreadCache 中，这样在下次分配内存时会提高分配效率，但是当内存块被用完一次后，再没有分配需求，那么一直驻留在内存中又会造成浪费。 
+    
+    1. 默认每执行 8192 次 allocate()，就会调用一次 trim() 进行内存整理;
+    2. Netty 在线程退出的时候还会回收该线程的所有内存,PoolThreadCache 重载了 finalize() 方法，在销毁前执行缓存回收的逻辑.
+
+#### 4. 对象池Recycler
+1. Recycler简介
+
+    1. 当需要某个对象时，优先从对象池中获取对象实例。通过重用对象，能避免频繁地创建和销毁所带来的性能损耗，而且对 JVM GC 友好。
+    2. Recycler 是 Netty 提供的自定义实现的轻量级对象回收站;
+    3. 内部结构：Stack、WeakOrderQueue、Link、DefaultHandle
+![image](https://user-images.githubusercontent.com/41152743/143019229-5ca725e2-40ca-4eca-abbc-6f55797b3d88.png)
+
+
+
+
+
+
+
+
+
+
+
+    
