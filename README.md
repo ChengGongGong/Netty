@@ -507,9 +507,28 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
     
     Huge：代表大于 16M 的内存块，直接使用非池化的方式进行内存分配。
     
-    1. 在每个区域内定义了更细粒度的内存分配单位，包括Chunk、Page、Subpage。
+    在每个区域内定义了更细粒度的内存分配单位，包括Chunk、Page、Subpage。
         
             1. Subpage：负责 Page 内的内存分配，将 Page 划分为多个相同的子块进行分配，根据不同的规格进行不同的划分。
             2. Page：Chunk 用于管理内存的单位，Netty 中的 Page 的大小为 8K。
             3. Chunk ：Netty 向操作系统申请内存的单位，以理解为 Page 的集合，每个 Chunk 默认大小为 16M。
-
+2. 内存池架构设计
+    
+    1. PoolArea：采用固定数量的多个 Arena 进行内存分配，Arena 的默认数量与 CPU 核数有关。
+ ![image](https://user-images.githubusercontent.com/41152743/142994043-dd82a1ff-c780-46c2-9576-4b3375ab0ab4.png)
+        
+        1. PoolSubpage 数组：用于分配小于 8K 的内存，存放Tiny 和 Small 类型的内存块，采用向上取整的方式分配节点进行分配；
+        2. PoolChunkList：用于存储不同利用率的Chunk，构成一个双向循环链表。
+        
+            qInit，内存使用率为 0 ~ 25% 的 Chunk，用于存储初始化分配的PoolChunk,即使内存被完全释放也不会被回收，避免PoolChunk的重复初始化工作。
+            q000，内存使用率为 1 ~ 50% 的 Chunk。
+            q025，内存使用率为 25% ~ 75% 的 Chunk。
+            q050，内存使用率为 50% ~ 100% 的 Chunk。
+            q075，内存使用率为 75% ~ 100% 的 Chunk。
+            q100，内存使用率为 100% 的 Chunk。
+            
+            1. 在分配大于 8K 的内存时，其链表的访问顺序是 q050->q025->q000->qInit->q075，优先选择q050，是因为使PoolChunk 的使用率范围保持在中间水平，降低了 PoolChunk 被回收的概率。
+            2. 每个 PoolChunkList 都有内存使用率的上下限：minUsage 和 maxUsage，如果使用率超过 maxUsage，那么会从当前 PoolChunkList 移除，并移动到下一个；
+                如果使用率小于 minUsage，那么 PoolChunk 会从当前 PoolChunkList 移除，并移动到前一个。
+            3.如果 PoolChunk 的使用率一直处于临界值，会导致 PoolChunk 在两个 PoolChunkList 不断移动，造成性能损耗。
+       3. Poll
