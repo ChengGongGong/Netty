@@ -568,9 +568,21 @@ io.netty.buffer.PoolChunk#allocate：
     2. Recycler 是 Netty 提供的自定义实现的轻量级对象回收站;
     3. 内部结构：Stack、WeakOrderQueue、Link、DefaultHandle
 ![image](https://user-images.githubusercontent.com/41152743/143019229-5ca725e2-40ca-4eca-abbc-6f55797b3d88.png)
-
-
-
+        1. Stack：用于存储当前本线程回收的对象，在多线程的场景下，Netty 为了避免锁竞争问题，每个线程都会持有各自的对象池，内部通过 FastThreadLocal 来实现每个线程的私有化。
+![image](https://user-images.githubusercontent.com/41152743/143430463-8ba2b443-2101-4355-aa02-cf3ea693503f.png)
+        2. WeakOrderQueue：用于存储其他线程回收到当前线程所分配的对象，例如：ThreadB 回收到 ThreadA 所分配的内存时，就会被放到 ThreadA 的 WeakOrderQueue 当中。
+        3. Link：每个 WeakOrderQueue 中都包含一个 Link 链表，回收对象都会被存在 Link 链表中的节点上，每个 Link 节点默认存储 16 个对象。
+        4. DefaultHandle：保存了实际回收的对象。
+    4. 具体原理
+    
+        io.netty.util.Recycler#get：获取对象的主流程：
+            当 Stack 中 elements 有数据时，直接从栈顶弹出；
+            当 Stack 中 elements 没有数据时，尝试从 WeakOrderQueue 中回收一个 Link 包含的对象实例到 Stack 中，然后从栈顶弹出。
+    5.  对象回收原理
+        
+        io.netty.util.Recycler.DefaultHandle#recycle：分为同线程回收(当前线程回收自己分配的对象)、异线程回收
+        1. 同线程回收直接向 Stack 中添加对象，异线程回收向 WeakOrderQueue 中的 Link 添加对象。
+        2. 对象回收都会控制回收速率，每 8 个对象会回收一个，其他的全部丢弃。
 
 
 
