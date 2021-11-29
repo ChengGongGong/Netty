@@ -583,6 +583,62 @@ io.netty.buffer.PoolChunk#allocate：
         io.netty.util.Recycler.DefaultHandle#recycle：分为同线程回收(当前线程回收自己分配的对象)、异线程回收
         1. 同线程回收直接向 Stack 中添加对象，异线程回收向 WeakOrderQueue 中的 Link 添加对象。
         2. 对象回收都会控制回收速率，每 8 个对象会回收一个，其他的全部丢弃。
+#### 5.Netty零拷贝技术
+1. 传统Linux的零拷贝技术
+    
+    传统的文件传输经历了四次数据拷贝：
+ 
+![image](https://user-images.githubusercontent.com/41152743/143553052-69a5d57b-2d06-4e31-bde6-b48f55269831.png)
+        
+        1. 第一次拷贝：(DMA拷贝磁盘文件到内核缓冲区)，用户进程发起 read() 调用后，上下文从用户态切换至内核态，DMA 引擎从文件中读取数据，并存储到内核态缓冲区。
+            注：DMA直接内存访问（Direct Memory Access） 技术，在进行 I/O 设备和内存的数据传输的时候，数据搬运的工作全部交给 DMA 控制器，而 CPU 不再参与任何与数据搬运相关的事情，这样 CPU 就可以去处理别的事务。
+        2. 第二次拷贝：(内核缓冲区的数据到用户缓冲区)，CPU将请求的数据从内核态缓冲区拷贝到用户态缓冲区，然后返回给用户进程，上下文从内核爱切换至用户态；
+        3. 第三次拷贝：(用户缓冲区的数据到内核socket缓冲区)，用户进程调用 send() 方法期望将数据发送到网络中，上下文从用户态切换至内核态，CPU将请求的数据从用户态缓冲区被拷贝到 Socket 缓冲区。
+        4. 第四次拷贝：(内核socket缓冲区的数据到网卡缓冲区)，send() 系统调用结束返回给用户进程，上下文从内核态切换至用户态，DMA将把内核的 socket 缓冲区里的数据，拷贝到网卡的缓冲区里。
+ 
+零拷贝：数据操作时，不需要将数据从一个内存位置拷贝到另外一个内存位置，减少一次内存拷贝的损耗，节省CPU 时钟周期和内存带宽。即减少第二次和第三次数据拷贝，常见的实现方式：
+       
+    1. mmap+write：mmap() 系统调用函数会直接把内核缓冲区里的数据「映射」到用户空间，这样，操作系统内核与用户空间就不需要再进行任何的数据拷贝操作，可以减少一次数据拷贝。
+    但是仍然需要4次上下文切换，2次系统调用。
+        buf = mmap(file, len);
+        write(sockfd, buf, len);
+![image](https://user-images.githubusercontent.com/41152743/143796251-fe812e07-18e2-4167-bbb1-6fcc340fc386.png)
+    2. sendfile：
+    linux 2.1系统调用函数，可以代替read()和write()这两个系统调用，减少一次系统调用，减少了 2 次上下文切换的开销。因此需要2 次上下文切换，和 3 次数据拷贝：
+![image](https://user-images.githubusercontent.com/41152743/143797363-9add8c74-2bb6-4fc9-8a37-6ebb3ce64a32.png)
+    linux 2.4 如果网卡支持SG-DMA技术，sendfile()变化如下：只需要2次上下文切换和数据拷贝，没有在内存层面去拷贝数据，所有数据通过DMA进行传输
+![image](https://user-images.githubusercontent.com/41152743/143797472-9344f5e5-9f4f-431a-8be3-647fbcdd8622.png)
+
+    (注：此处的内核缓冲区实际上是磁盘高速缓存(PageCache),用于缓存最近被访问的数据，当空间不足时淘汰最久未被访问的缓存,同时采用了预读功能，但是在传输大文件(GB级别)，PageCache 会不起作用,使用异步I/O+直接I/O代替零拷贝技术)
+2. Netty的零拷贝技术
+    
+    1. 使用堆外内存，避免 JVM 堆内存到堆外内存的数据拷贝；
+    2. CompositeByteBuf 类，可以组合多个 Buffer 对象合并成一个逻辑上的对象；
+    3. 通过 Unpooled.wrappedBuffer 可以将 byte 数组包装成 ByteBuf 对象，包装过程中不会产生内存拷贝；
+    4. ByteBuf.slice 操作，可以将一个 ByteBuf 对象切分成多个 ByteBuf 对象，切分过程中不会产生内存拷贝，底层共享一个 byte 数组的存储空间；
+    5. 使用 FileRegion 实现文件传输， 底层封装了NIO FileChannel#transferTo() 方法，底层就依赖了操作系统零拷贝的机制，将文件缓冲区的数据直接传输到目标 Channel，避免内核缓冲区和用户态缓冲区之间的数据拷贝。
+#### 6. 其他
+1. 服务端启动全过程
+
+    1. io.netty.bootstrap.AbstractBootstrap#bind(java.net.SocketAddress)， initAndRegister() 初始化并注册Channel(异步)，如果执行完毕则调用 doBind0() 进行 Socket 绑定，否则添加一个 ChannelFutureListener 回调监听，初始化完毕后调用operationComplete()，同样通过 doBind0() 进行端口绑定。      
+        1. 服务端 Channel 初始化及注册：io.netty.bootstrap.AbstractBootstrap#initAndRegister，包括三步：
+            1. 创建服务端 Channel：
+                1. 通过ReflectiveChannelFactory 通过反射创建 NioServerSocketChannel 实例；
+                2. 创建 JDK 底层的 ServerSocketChannel；
+                3. 为 Channel 创建 id、unsafe、pipeline 三个重要的成员变量；io.netty.channel.AbstractChannel#AbstractChannel(io.netty.channel.Channel)
+                4. 设置 Channel 为非阻塞模式
+            2. 初始化服务端 Channel:
+                1. 设置 Socket 参数以及用户自定义属性;
+                2. 添加特殊的 Handler 处理器，为 Pipeline 添加了一个 ChannelInitializer，用于添加 ServerSocketChannel 对应的 Handler，然后异步 task 的方式向 Pipeline添加 一个处理器 ServerBootstrapAcceptor(专门用于接收新的连接，然后把事件分发给 EventLoop 执行)。
+                3.  注册服务端 Channel：io.netty.channel.AbstractChannel.AbstractUnsafe#register0，选择一个 EventLoop 与当前 Channel 进行绑定，负责该channel的生命周期。
+                    1. 调用 JDK 底层进行 Channel 注册；
+                    2. 触发 handlerAdded 事件，添加用户自定义的业务处理器(ServerSocketChannel 对应的 Handler)，handler() 方法是添加到服务端的Pipeline 上，而 childHandler() 方法是添加到客户端的 Pipeline 上
+                    3. 触发 channelRegistered 事件，
+                    4. Channel 当前状态为活跃时，触发 channelActive 事件
+    3. 
+    io.netty.channel.AbstractChannel#AbstractChannel(io.netty.channel.Channel)
+
+
 
 
 
