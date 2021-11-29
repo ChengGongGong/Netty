@@ -635,8 +635,15 @@ io.netty.buffer.PoolChunk#allocate：
                     2. 触发 handlerAdded 事件，添加用户自定义的业务处理器(ServerSocketChannel 对应的 Handler)，handler() 方法是添加到服务端的Pipeline 上，而 childHandler() 方法是添加到客户端的 Pipeline 上
                     3. 触发 channelRegistered 事件，
                     4. Channel 当前状态为活跃时，触发 channelActive 事件
-    3. 
-    io.netty.channel.AbstractChannel#AbstractChannel(io.netty.channel.Channel)
+        2. 端口绑定-io.netty.channel.AbstractChannel.AbstractUnsafe#bind
+            1. 调用 JDK 底层进行端口绑定
+            2. 绑定成功后并触发 channelActive 事件-io.netty.channel.DefaultChannelPipeline.HeadContext#channelActive，把 OP_ACCEPT 事件注册到 Channel 的事件集合中。
+2. 服务端处理客户端连接
+
+    1. Boss NioEventLoop 线程轮询客户端新连接 OP_ACCEPT 事件；
+    2. 构造 Netty 客户端 NioSocketChannel；
+    3. 注册 Netty 客户端 NioSocketChannel 到 Worker 工作线程中；
+    4. 注册 OP_READ 事件到 NioSocketChannel 的事件集合。
 
 
 
