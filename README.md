@@ -640,9 +640,9 @@ io.netty.buffer.PoolChunk#allocate：
             2. 绑定成功后并触发 channelActive 事件-io.netty.channel.DefaultChannelPipeline.HeadContext#channelActive，把 OP_ACCEPT 事件注册到 Channel 的事件集合中。
 2. 服务端处理客户端连接
 
-    1. Boss NioEventLoop 线程轮询客户端新连接 OP_ACCEPT 事件；
-    2. 构造 Netty 客户端 NioSocketChannel；
-    3. 注册 Netty 客户端 NioSocketChannel 到 Worker 工作线程中；
+    1. Boss NioEventLoop 线程轮询客户端新连接 OP_ACCEPT 事件；io.netty.channel.nio.NioEventLoop#processSelectedKey(java.nio.channels.SelectionKey, io.netty.channel.nio.AbstractNioChannel)
+    2. 构造 Netty 客户端 NioSocketChannel；io.netty.channel.socket.nio.NioServerSocketChannel#doReadMessages
+    3. 注册 Netty 客户端 NioSocketChannel 到 Worker 工作线程中；io.netty.bootstrap.ServerBootstrap.ServerBootstrapAcceptor#channelRead
     4. 注册 OP_READ 事件到 NioSocketChannel 的事件集合。
 
 
