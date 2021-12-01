@@ -212,7 +212,14 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
    
         io.netty.util.concurrent.SingleThreadEventExecutor#execute(java.lang.Runnable, boolean)-添加任务
         io.netty.channel.nio.NioEventLoop#run-(事件轮询、事件分发、任务处理)
-        
+            
+            1. 轮询 I/O 事件（select）：轮询 Selector 选择器中已经注册的所有 Channel 的 I/O 事件;
+            2. 处理 I/O 事件（processSelectedKeys）：处理已经准备就绪的 I/O 事件，两种方式，一种是处理 Netty 优化过的 selectedKeys，数组存储，另外一种是正常的处理逻辑，JDK 的 HashSet 遍历效率，根据 SelectionKey 上挂载的 attachment 判断 SelectionKey 的类型：
+                1. OP_CONNECT ，连接建立事件：调用 unsafe.finishConnect() 方法通知上层连接已经建立，底层调用pipeline().fireChannelActive() 方法产生一个Inbound事件，在pipeline中传播，依次调用ChannelHandler 的 channelActive() ；
+                2. OP_WRITE，可写事件：执行 ch.unsafe().forceFlush() 操作，将数据冲刷到客户端，最终会调用 javaChannel 的 write() 方法执行底层写操作；
+                3. OP_READ，可读事件：从 Channel 中读取数据并存储到分配的 ByteBuf；调用 pipeline.fireChannelRead() 方法产生 Inbound 事件，然后依次调用 ChannelHandler 的 channelRead() 方法处理数据；调用 pipeline.fireChannelReadComplete() 方法完成读操作；最后执行 removeReadOp() 清除 OP_READ 事件
+            3. 处理异步任务队列（runAllTasks）：处理任务队列中的非 I/O 任务，提供了 ioRatio 参数用于调整 I/O 事件处理和任务处理的时间比例。
+            
       1. 事件处理机制：无锁串行化的设计思路
  ![image](https://user-images.githubusercontent.com/41152743/142127529-07cb44a0-b173-463e-96a5-82f5d78d8e6a.png)
  
@@ -227,7 +234,7 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
              普通任务：SingleThreadEventExecutor#execute(java.lang.Runnable, boolean)，向任务队列中taskQueue 中添加任务。
                         taskQueue的实现类是多生产者单消费者队列 MpscChunkedArrayQueue，在多线程并发添加任务时，可以保证线程安全
              定时任务：AbstractScheduledEventExecutor#schedule()，向定时任务队列scheduledTaskQueue 添加任务，采用优先队列 PriorityQueue 实现。
-             尾部队列：tailTasks相比于普通任务队列优先级较低，在每次执行完 taskQueue 中任务后会去获取尾部队列中任务执行
+             尾部队列：tailTasks相比于普通任务队列优先级较低，在每次执行完 taskQueue 中任务后会去获取尾部队列中任务执行，并不常用，例如对 Netty 的运行状态做一些统计数据，任务循环的耗时、占用物理内存的大小等
       3. 最佳实践
             1. 网络连接建立过程中三次握手、安全认证的过程会消耗不少时间，建议采用 Boss 和 Worker 两个 EventLoopGroup，有助于分担 Reactor 线程的压力。
             2. Reactor 线程模式适合处理耗时短的任务场景，对于耗时较长的ChannelHandler可以考虑维护一个业务线程池，将编解码后的数据封装成Task异步处理，
@@ -243,10 +250,19 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
         3. ChannelPipeline 是线程安全的，因为每一个新的 Channel 都会对应绑定一个新的 ChannelPipeline，一个 ChannelPipeline 关联一个 EventLoop，一个 EventLoop 仅会绑定一个线程。
         4. ChannelPipeline 中包含入站 ChannelInboundHandler 和出站 ChannelOutboundHandler 两种处理器，客户端和服务端一次完整的请求应答过程可以分为三个步骤：
             客户端出站（请求数据）、服务端入站（解析数据并执行业务逻辑）、服务端出站（响应结果）。
-        5. ChannelPipeline 的双向链表分别维护了 HeadContext 和 TailContext 的头尾节点，自定义的ChannelHandler在Head和Tail之间。
+        5. ChannelPipeline 的双向链表分别维护了 HeadContext 和 TailContext 的头尾节点，自定义的ChannelHandler在Head和Tail之间
            1. HeadContext 既是 Inbound 处理器，也是 Outbound 处理器，作为头节点负责读取数据并开始传递 InBound 事件，数据处理完成后，会反方向经过 Outbound 处理器，最终传递到 HeadContext；
            2. TailContext 只实现了 ChannelInboundHandler 接口，用于终止InBound事件传播，作为 OutBound 事件传播的第一站，仅仅是将 OutBound 事件传递给上一个节点。
            3. Inbound 事件的传播方向为 Head -> Tail，而 Outbound 事件传播方向是 Tail -> Head。
+                1. inBound事件传播如下，例如channelRead，只有当用户自定义的Handler没有执行fireChannelRead() 操作，则终止Inbound事件传播；或者都执行了 fireChannelRead() 操作，Inbound 事件传播最终会在 TailContext 节点终止。
+![image](https://user-images.githubusercontent.com/41152743/144182539-7afad5d9-e98b-4a2b-a221-f9a281308e89.png)
+                2. outBound事件传播从 Tail -> Head；
+                3. 异常事件传播：异常处理器 ExceptionHandler 一般会继承 ChannelDuplexHandler(既是Inbound处理器，又是Outbound处理器)，被添加在用户自定义处理器的尾部；异常事件的传播顺序与 ChannelHandler 的添加顺序相同，会依次向后传播，与 Inbound 事件和 Outbound 事件无关。
+           4. io.netty.channel.DefaultChannelPipeline#addLast(io.netty.util.concurrent.EventExecutorGroup, java.lang.String, io.netty.channel.ChannelHandler)添加自定义ChannelHandler:
+                1. 检查是否重复添加 Handler。
+                2. 创建新的 DefaultChannelHandlerContext 节点。
+                3. 添加新的 DefaultChannelHandlerContext 节点到 ChannelPipeline。
+                4. 回调用户方法，用户 Handler 中实现的 handlerAdded() 方法
     3.2 ChannelHandler & ChannelHandlerContext：数据的编解码以及加工处理操作都是由 ChannelHandler 完成的
 
         1. ChannelHandler 有两个重要的子接口：ChannelInboundHandler和ChannelOutboundHandler，分别拦截入站和出站的各种 I/O 事件
@@ -645,12 +661,55 @@ io.netty.buffer.PoolChunk#allocate：
     3. 注册 Netty 客户端 NioSocketChannel 到 Worker 工作线程中；io.netty.bootstrap.ServerBootstrap.ServerBootstrapAcceptor#channelRead
     4. 注册 OP_READ 事件到 NioSocketChannel 的事件集合。
 
+3. FastThreadLocal
+    1. ThreadLocal简介
+    
+        1. 什么是ThreadLocal？
+   ![image](https://user-images.githubusercontent.com/41152743/144192961-c9cfd12c-14e3-4aba-859c-7f379cfcb152.png)
+    
+                ThreadLocal用于线程间隔离数据，每个线程都有一份数据的本地拷贝，用以解决线程安全问题;
+                每个线程都有个ThreadLocal.ThreadLocalMap对象，用以存储当前线程所有的ThreadLocal对象，key是ThreadLocal的弱引用，value是值;
+                Thread内部的Map是由ThreadLocal维护，ThreadLocal负责向map获取和设置线程的变量值;
+                一个Thread可以有多个ThreadLocal。   
+        2. ThreadLocalMap的hash算法
+                
+                初始容量为16的数组大小，扩容的阈值是容量*2/3；
+                获取key的hashCode：每创建一个ThreadLocal对象，就将hashCode值增加黄金分割数(0x61c88647)，为了使得hash分布非常均匀；
+                计算key的hashCode：key的hashCode值 & （容量值-1），容量是2的n次幂，按位&的效率大于取模运算，基于x mod 2^n = x & (2^n - 1)；
+        3. 解决hash冲突
+        
+                只有数组，没有链表；
+                先计算key的hash值，获取对应的entry，
+                若该位置对应的entry为空，则直接放置该数据；
+                若该位置对应的entry不为空，则线性逐个向后查找，如果找到槽位的key与当前的key相等，则更新该位置的值；如果槽位的key为null(过期的key)，则进行探测式的清理；如果没有遇到槽位的key为null，且找到entry为null的槽位，则放置该数据；
+         4. 缺点
+                
+                (1) ThreadLocal的key是弱引用，value不是弱引用，当threadLocal没有外部对象的强引用时，
+                    发生gc时会回收key，但是不会回收value，最终会存在<null,Object>的键值对，从而导致内存泄露；
+                     解决方案：
+                        在使用完ThrealLoal对象之后，调用remove方法；
+                        或者使用private static修饰定义，随着线程一起消亡；Thread Ref->Thread->ThreadLoclMap->Entry->vaule    
 
-
-
-
-
-
+                (2) 异步场景下无法给子线程共享父线程中创建的线程副本数据
+                    解决方案：
+                        使用InheritableThreadLocal
+         5.ThreadLocal为什么使用弱引用？
+            
+                如果key是使用强引用，当 ThreadLocal 不再使用时，ThreadLocalMap 中还是存在对 ThreadLocal 的强引用，那么 GC 是无法回收的，从而造成内存泄漏。
+                如果key是使用弱引用，在ThreadLocal调用set、get方法时，可以根据key=null对Entry进行清除，将value置为空，在下一次gc时进行回收，避免内存泄露。
+                但是，如果线程一直在运行，并且一直不执行set、get、remove方法，key=null的entry将永远无法回收，造成内存泄露。
+         6. 启发式清理与探测式清理？
+                
+                探测式清理：
+                    1. 将当前位置entry的value置为null，将entry置为null，并将数组的大小减1;
+                    2. 从当前位置向后线性遍历，遍历到entry为null则跳出循环，返回当前索引位置;
+                    3. 如果entry不为null， 遇到key=null的entry，将value和entry置为null，并将数组大小减1；
+                    4. 如果遇到的key不为null，重新计算k的hash位置，如果出现hash冲突，将当前位置的entry置为null，开始从重新计算的hash位置往后查找最近entry为null的槽位，放置数据；   
+                启发式清理：
+                    1. 从当前索引位置的下一个entry开始遍历，遍历次数由数组的大小决定；
+                    2. 如果没有遇到槽位的key为null，则需要循环log2(n)次；
+                    3. 如果遍历到key=null，从当前位置开始进行探测式清理，直到找到entry为null的槽位；
+                    4. 重新令entry为null的槽位为搜索起点，数组长度为遍历次数，扩大搜索范围log2(n')继续搜索
 
 
 
