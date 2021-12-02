@@ -716,13 +716,15 @@ io.netty.buffer.PoolChunk#allocate：
                 2. rehash：首先遍历数组，进行探测式清理工作，清理完成之后，如果当前容量大于数组容量的3/4，则开始resize操作；
                 3. resize: 将新数组的容量扩充为原来的2倍，然后遍历旧数组，重新在新数组中计算hash位置，如果出现hash冲突则往后查找最近entry为null的槽位，放置数据
     2. FastThreadLocal 简介
-    
+ ![image](https://user-images.githubusercontent.com/41152743/144373445-5a2b23fa-d8d8-45b0-b6ae-e222e1c4469b.png)
+ 
         1. 什么是FastThreadLocal？
 ![image](https://user-images.githubusercontent.com/41152743/144342762-747fe60a-6857-4fb8-9e8f-b299f464291d.png)
     
                 Netty 为 FastThreadLocal 量身打造了 FastThreadLocalThread 和 InternalThreadLocalMap 两个重要的类；
-                FastThreadLocalThread 是对 Thread 类的一层包装，每个线程对应一个 InternalThreadLocalMap 实例，用于存储数据
-                只有 FastThreadLocal 和 FastThreadLocalThread 组合使用时，才能发挥 FastThreadLocal 的性能优势
+                FastThreadLocalThread 是对 Thread 类的一层包装，每个线程对应一个 InternalThreadLocalMap 实例，用于存储数据;
+                只有 FastThreadLocal 和 FastThreadLocalThread 组合使用时，才能发挥 FastThreadLocal 的性能优势;
+                每一个FastThreadLocal在创建时，都有一个全局唯一的递增下标，当获取值时，直接从数组获取返回
         2. set原理 io.netty.util.concurrent.FastThreadLocal#set(V)
        
                 1. 判断value是否缺省值，是则调remove()：
@@ -737,6 +739,11 @@ io.netty.buffer.PoolChunk#allocate：
                     1.找到数组下标index位置，设置为新的value；如果容量不足，则自动扩容(以index为基准，按hashMap的方式扩容)，设置新的value
                     2. 将 FastThreadLocal 对象保存到待清理的 Set 中。
                         在InternalThreadLocalMap 中找到数组下标为 0 的元素，如果不存在则创建一个FastThreadLocal 类型的 Set 集合并填充，存在则转换获得set集合
-                       
-      
-    
+       3. 资源回收机制                
+            
+                1. 自动：使用FastThreadLocalThread执行一个被FastThreadLocalRunnable wrap的Runnable任务，在任务执行完毕后会自动进行ftl的清理。
+                2. 手动：调用FastThreadLocal和InternalThreadLocalMap的remove方法，手动显示删除
+        4. 优势
+                
+                1. 高效查找：定位数据时可以直接根据数组下标index获取，时间复杂度为O(1)，JDK 原生的 ThreadLocal 在数据较多时哈希表很容易发生 Hash 冲突，线性探测法在解决 Hash 冲突时需要不停地向下寻找，效率较低。数组扩容更加简单高效，FastThreadLocal 以 index 为基准向上取整到 2 的次幂作为扩容后容量，然后把原数据拷贝到新数组，而ThreadLocal 采用的哈希表需要在扩容后做一次rehash。
+                2. 安全性更高：JDK原生的ThreadLocal 使用不当可能造成内存泄漏，只能等待线程销毁。在使用线程池的场景下，ThreadLocal 只能通过主动检测的方式防止内存泄漏，从而造成了一定的开销。然而 FastThreadLocal 不仅提供了 remove() 主动清除对象的方法，而且在线程池场景中 Netty 还封装了 FastThreadLocalRunnable，可以自动清理对象
