@@ -747,3 +747,27 @@ io.netty.buffer.PoolChunk#allocate：
                 
                 1. 高效查找：定位数据时可以直接根据数组下标index获取，时间复杂度为O(1)，JDK 原生的 ThreadLocal 在数据较多时哈希表很容易发生 Hash 冲突，线性探测法在解决 Hash 冲突时需要不停地向下寻找，效率较低。数组扩容更加简单高效，FastThreadLocal 以 index 为基准向上取整到 2 的次幂作为扩容后容量，然后把原数据拷贝到新数组，而ThreadLocal 采用的哈希表需要在扩容后做一次rehash。
                 2. 安全性更高：JDK原生的ThreadLocal 使用不当可能造成内存泄漏，只能等待线程销毁。在使用线程池的场景下，ThreadLocal 只能通过主动检测的方式防止内存泄漏，从而造成了一定的开销。然而 FastThreadLocal 不仅提供了 remove() 主动清除对象的方法，而且在线程池场景中 Netty 还封装了 FastThreadLocalRunnable，可以自动清理对象
+
+4. 时间轮-io.netty.util.HashedWheelTimer
+    1. Timer简介-io.netty.util.Timer
+   
+        1. Timer提供了两个方法，用于创建任务 newTimeout() 和停止所有未执行任务 stop()。
+        2. Timeout 持有 Timer 和 TimerTask 的引用，而且通过 Timeout 接口可以执行取消任务的操作
+        3. Timer、Timeout 和 TimerTask 之间的关系：
+![image](https://user-images.githubusercontent.com/41152743/144393477-1cd3f5d1-9eab-471e-ac9b-07a32bc5348f.png)
+    
+    2. 初始化
+    
+            1. threadFactory：线程池，但是只创建了一个线程；
+            2. tickDuration：时针每次 tick 的时间，相当于时针间隔多久走到下一个 slot，默认100；
+            3. unit：表示 tickDuration 的时间单位，默认毫秒
+            4. ticksPerWheel：时间轮上一共有多少个 slot，默认 512 个。分配的 slot 越多，占用的内存空间就越大；
+            5. leakDetection：是否开启内存泄漏检测；
+            6. maxPendingTimeouts：最大允许等待任务数。
+            7. HashedWheelBucket[]数组，每个 HashedWheelBucket 表示时间轮中一个 slot，其内部是一个双向链表结构，双向链表的每个节点持有一个 HashedWheelTimeout 对象，HashedWheelTimeout 代表一个定时任务。
+            
+
+
+
+
+
