@@ -723,7 +723,20 @@ io.netty.buffer.PoolChunk#allocate：
                 Netty 为 FastThreadLocal 量身打造了 FastThreadLocalThread 和 InternalThreadLocalMap 两个重要的类；
                 FastThreadLocalThread 是对 Thread 类的一层包装，每个线程对应一个 InternalThreadLocalMap 实例，用于存储数据
                 只有 FastThreadLocal 和 FastThreadLocalThread 组合使用时，才能发挥 FastThreadLocal 的性能优势
-       2. set原理 io.netty.util.concurrent.FastThreadLocal#set(V)
-        
+        2. set原理 io.netty.util.concurrent.FastThreadLocal#set(V)
+       
+                1. 判断value是否缺省值，是则调remove()：
+                    1. 获取当前线程的InternalThreadLocalMap
+                    2. 定位到下标index位置的元素，并设置为缺省值
+                    3. 从InternalThreadLocalMap 会取出数组下标 0 位置的 Set 集合，删除当前的FastThreadLocal 对象。
+                    4. onRemoval() 方法，扩展方法，用于用户需要在删除的时候做一些后置操作，继承 FastThreadLocal 并实现该方法
+                2. 不是,则获取当前线程的 InternalThreadLocalMap:
+                    1. 如果线程是 FastThreadLocalThread 类型，直接获取线程的threadLocalMap 属性，没有就创建一个初始化长度为32的Object数组；
+                    2. 如果线程不是FastThreadLocalThread 类型，采用JDK原生的ThreadLocal，其中存放InternalThreadLocalMap
+                3. 将InternalThreadLocalMap 中对应数据替换为新的 value。
+                    1.找到数组下标index位置，设置为新的value；如果容量不足，则自动扩容(以index为基准，按hashMap的方式扩容)，设置新的value
+                    2. 将 FastThreadLocal 对象保存到待清理的 Set 中。
+                        在InternalThreadLocalMap 中找到数组下标为 0 的元素，如果不存在则创建一个FastThreadLocal 类型的 Set 集合并填充，存在则转换获得set集合
+                       
       
     
