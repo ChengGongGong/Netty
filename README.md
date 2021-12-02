@@ -710,7 +710,20 @@ io.netty.buffer.PoolChunk#allocate：
                     2. 如果没有遇到槽位的key为null，则需要循环log2(n)次；
                     3. 如果遍历到key=null，从当前位置开始进行探测式清理，直到找到entry为null的槽位；
                     4. 重新令entry为null的槽位为搜索起点，数组长度为遍历次数，扩大搜索范围log2(n')继续搜索
-
-
-
+        7. 扩容机制
+                
+                1. 当进行启发式清理没有清理任何数据，且entry数组的长度的长度到达了扩容的阈值(len*2/3),则开始进行rehash操作；
+                2. rehash：首先遍历数组，进行探测式清理工作，清理完成之后，如果当前容量大于数组容量的3/4，则开始resize操作；
+                3. resize: 将新数组的容量扩充为原来的2倍，然后遍历旧数组，重新在新数组中计算hash位置，如果出现hash冲突则往后查找最近entry为null的槽位，放置数据
+    2. FastThreadLocal 简介
+    
+        1. 什么是FastThreadLocal？
+![image](https://user-images.githubusercontent.com/41152743/144342762-747fe60a-6857-4fb8-9e8f-b299f464291d.png)
+    
+                Netty 为 FastThreadLocal 量身打造了 FastThreadLocalThread 和 InternalThreadLocalMap 两个重要的类；
+                FastThreadLocalThread 是对 Thread 类的一层包装，每个线程对应一个 InternalThreadLocalMap 实例，用于存储数据
+                只有 FastThreadLocal 和 FastThreadLocalThread 组合使用时，才能发挥 FastThreadLocal 的性能优势
+       2. set原理 io.netty.util.concurrent.FastThreadLocal#set(V)
+        
+      
     
