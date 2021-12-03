@@ -801,7 +801,7 @@ io.netty.buffer.PoolChunk#allocate：
             2. 此外任务的到期时间跨度很大，也会造成空推进的问题；
             3. 只适用于处理耗时较短的任务，由于 Worker 是单线程的，如果一个任务执行的时间过长，会造成 Worker 线程阻塞；
             4. 相比传统定时器的实现方式，内存占用较大    
-        2. 解决方案：
+        2. 解决方案
          
             1. Kafka中的时间轮内部结构与netty类似，采用环形数组存储定时任务，数组中的每个 slot 代表一个 Bucket，每个 Bucket 保存了定时任务列表 TimerTaskList，TimerTaskList 同样采用双向链表的结构实现，链表的每个节点代表真正的定时任务 TimerTaskEntry。
                为了解决空推进的问题，Kafka 借助 JDK 的 DelayQueue 来负责推进时间轮，DelayQueue 保存了时间轮中的每个 Bucket，并且根据 Bucket 的到期时间进行排序，最近的到期时间被放在 DelayQueue 的队头。
