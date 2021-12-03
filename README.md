@@ -764,10 +764,26 @@ io.netty.buffer.PoolChunk#allocate：
             4. ticksPerWheel：时间轮上一共有多少个 slot，默认 512 个。分配的 slot 越多，占用的内存空间就越大；
             5. leakDetection：是否开启内存泄漏检测；
             6. maxPendingTimeouts：最大允许等待任务数。
-            7. HashedWheelBucket[]数组，每个 HashedWheelBucket 表示时间轮中一个 slot，其内部是一个双向链表结构，双向链表的每个节点持有一个 HashedWheelTimeout 对象，HashedWheelTimeout 代表一个定时任务。
+            7. taskExecutor：线程执行器，默认为io.netty.util.concurrent.ImmediateExecutor
+            8. HashedWheelBucket[]数组，每个 HashedWheelBucket 表示时间轮中一个 slot，其内部是一个双向链表结构，双向链表的每个节点持有一个 HashedWheelTimeout 对象，HashedWheelTimeout 代表一个定时任务。
+    3. 添加任务-io.netty.util.HashedWheelTimer#newTimeout
             
-
-
+            1. 启动工作线程-Worker
+            2. 创建定时任务-封装成HashedWheelTimeout
+            3. 把任务添加到 Mpsc Queue中
+    4. 执行任务-工作线程Worker-io.netty.util.HashedWheelTimer.Worker#run
+            
+            1. 通过 waitForNextTick() 方法计算出时针到下一次 tick 的时间间隔，然后 sleep 到下一次 tick。
+            2. 通过位运算获取当前 tick 在 HashedWheelBucket 数组中对应的下标
+            3. 移除被取消的任务
+            4. 从 Mpsc Queue 中取出任务加入对应的 HashedWheelBucket 中；
+                1. 每次时钟最多只处理100000 个任务，一方面避免取任务的操作耗时过长，另一方面为了防止执行太多任务造成 Worker 线程阻塞；
+                2. 根据用户设置任务的deadline，计算出需要经过多少次tick才能开始执行以及在时间轮中转动的圈数；
+                3. 如果某个任务的执行时间特别长，在timeouts队列里已经过了执行时间，会将该任务加入到当前 HashedWheelBucket 中
+            5. 执行当前 HashedWheelBucket 中的到期任务；
+                1. 从头开始遍历 HashedWheelBucket 中的双向链表，如果remainingRounds <=0 ，则调用 expire() 方法执行任务；
+                2. 如果任务已经被取消，直接从链表中移除；
+                3. 如果任务的执行时间还没到，remainingRounds 减 1，等待下一圈即可。
 
 
 
