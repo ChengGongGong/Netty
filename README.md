@@ -784,6 +784,35 @@ io.netty.buffer.PoolChunk#allocate：
                 1. 从头开始遍历 HashedWheelBucket 中的双向链表，如果remainingRounds <=0 ，则调用 expire() 方法执行任务；
                 2. 如果任务已经被取消，直接从链表中移除；
                 3. 如果任务的执行时间还没到，remainingRounds 减 1，等待下一圈即可。
-
-
-
+            6. 时间轮退出后，取出 HashedWheelBucket[]数组(slot) 中未执行且未被取消的任务，并加入未处理任务列表；
+                将还没来得及添加到 slot 中的任务取出，如果任务未取消则加入未处理任务列表，以便stop()方法统一处理。
+                
+    5. 取消任务-io.netty.util.HashedWheelTimer#stop
+        
+            1. 如果当前线程是 Worker 线程，不能发起停止时间轮的操作，为了防止有定时任务发起停止时间轮的恶意操作；
+            2. 尝试通过 CAS 操作将工作线程的状态更新为 SHUTDOWN 状态；
+            3. 然后中断工作线程 Worker；
+            4. 最后将未处理的任务列表返回给上层。
+    6. 总结
+        
+        1.存在的问题
+        
+            1. Netty的时间轮是通过固定的时间间隔 tickDuration 进行推动的，如果长时间没有到期任务，会存在时间轮空推进的现象，造成性能损耗；
+            2. 此外任务的到期时间跨度很大，也会造成空推进的问题；
+            3. 只适用于处理耗时较短的任务，由于 Worker 是单线程的，如果一个任务执行的时间过长，会造成 Worker 线程阻塞；
+            4. 相比传统定时器的实现方式，内存占用较大    
+        2. 解决方案：
+         
+            1. Kafka中的时间轮内部结构与netty类似，采用环形数组存储定时任务，数组中的每个 slot 代表一个 Bucket，每个 Bucket 保存了定时任务列表 TimerTaskList，TimerTaskList 同样采用双向链表的结构实现，链表的每个节点代表真正的定时任务 TimerTaskEntry。
+               为了解决空推进的问题，Kafka 借助 JDK 的 DelayQueue 来负责推进时间轮，DelayQueue 保存了时间轮中的每个 Bucket，并且根据 Bucket 的到期时间进行排序，最近的到期时间被放在 DelayQueue 的队头。
+              Kafka 中会有一个线程来读取 DelayQueue 中的任务列表，如果时间没有到，那么 DelayQueue 会一直处于阻塞状态，从而解决空推进的问题；
+            2. 时间跨度大的问题：Kafka 引入了层级时间轮，
+                
+                
+                
+                
+                
+                
+                
+                
+                
