@@ -811,12 +811,47 @@ io.netty.buffer.PoolChunk#allocate：
                 为了解决空推进的问题，Kafka 借助 JDK 的 DelayQueue 来负责推进时间轮，DelayQueue 保存了时间轮中的每个 Bucket，并且根据 Bucket 的到期时间进行排序，最近的到期时间被放在 DelayQueue 的队头。
                 Kafka 中会有一个线程来读取 DelayQueue 中的任务列表，如果时间没有到，那么 DelayQueue 会一直处于阻塞状态，从而解决空推进的问题；
         2. 时间跨度大的问题：Kafka 引入了层级时间轮，
+5. 高性能无锁队列                          
+
+    1.JDK 原生并发队列
+    
+        1. 阻塞队列
+ ![image](https://user-images.githubusercontent.com/41152743/144556614-5313bc1b-e62c-4544-8dea-ee9f3ecd2708.png)
+ ![image](https://user-images.githubusercontent.com/41152743/144557539-fbab0853-e67f-4006-8840-3b3cfb1092ff.png)
+
+        2. 非阻塞队列
+            
+            ConcurrentLinkedQueue：采用双向链表实现的无界并发非阻塞队列；
+            ConcurrentLinkedDeque：采用双向链表结构的无界并发非阻塞队列，双端队列，同时支持FIFO 和 FILO 两种模式       
+    2. 第三方框架提供的高性能无锁队列- Disruptor 和 JCTools。
+        
+        1. 伪共享问题
+            
+            CPU 处理器速度远远大于在主内存中的，为了解决速度差异，在他们之间架设了多级缓存，如 L1、L2、L3 级别的缓存，这些缓存离CPU越近就越快；
+            从性能上来说L1 > L2 > L3，容量方面 L1 < L2 < L3；
+            多线程之间共享一份数据的时候，需要其中一个线程将数据写回主存，其他线程访问主存数据；
+            CPU从内存中加载数据时，使用缓存行提供缓存利用率，CPU 缓存由若干个 Cache Line 组成，Cache Line 的大小与 CPU 架构有关，在目前主流的 64 位架构下，Cache Line 的大小通常为 64 Byte。
+            CPU 在加载内存数据时，会将相邻的数据一同读取到 Cache Line 中， 避免 CPU 频繁与内存进行交互。
+            伪共享问题：当多线程修改相互独立的变量时，如果这些变量共享同一个缓存行，会造成写竞争激烈，数据频繁写入内存，导致性能浪费
+            避免：
+                1. 让不同线程共享的对象加载到不同的缓存行，通过缓存行填充的方式，变量 value 前后都填充了 7 个 long 类型的变量，JCTools的Mpsc Queue采用这种方式
+        2. org.jctools.queues.MpscArrayQueue
+            
+            1. org.jctools.queues.MpscArrayQueue#offer
+                1. 获取生产者索引，初始化状态时，producerLimit = capacity = 2，producerIndex = consumerIndex = 0;
+                2. 判断生产者索引是否大于producerLimit 阈值(producerLimit 缓存值过期了或者队列已经满了)
+                3. 获取最新的消费者索引重新计算于producerLimit，如果生产者索引仍大于该值，队列已满，返回退出；
+                4. 重新CAS 更新 producerLimit
+                5. CAS 更新生产者索引，更新成功则退出，说明当前生产者已经占领索引值;
+                6. putOrderedObject() 用于更新对象的值，并不会立刻将数据更新到内存中，采用LazySet 延迟更新机制，代价是写操作结果有纳秒级的延迟，不会立刻被其他线程以及自身线程可见。
+                    因为在 Mpsc Queue 的使用场景中，多个生产者只负责写入数据，并没有写入之后立刻读取的需求，所以使用 LazySet 机制是没有问题的。
+                (注：Java 中有四种类型的内存屏障，分别为 LoadLoad、StoreStore、LoadStore 和 StoreLoad。)
                 
-                
-                
-                
-                
-                
+            2. org.jctools.queues.MpscArrayQueue#poll
+                1. 直接返回消费者索引 consumerIndex；
+                2. 计算数组对应的偏移量， 取出数组中 offset 对应的元素
+                3. 获取到的元素为 NULL 时，有两种可能的情况：队列为空或者生产者填充的元素还没有对消费者可见。如果消费者索引 consumerIndex 等于生产者 producerIndex，说明队列为空。只要两者不相等，消费者需要等待生产者填充数据完毕。
+                4. 当成功消费数组中的元素之后，需要把当前消费者索引 consumerIndex 的位置置为 NULL，然后把 consumerIndex 移动到数组下一个位置。
                 
                 
                 
