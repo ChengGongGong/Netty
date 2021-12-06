@@ -852,6 +852,18 @@ io.netty.buffer.PoolChunk#allocate：
                 2. 计算数组对应的偏移量， 取出数组中 offset 对应的元素
                 3. 获取到的元素为 NULL 时，有两种可能的情况：队列为空或者生产者填充的元素还没有对消费者可见。如果消费者索引 consumerIndex 等于生产者 producerIndex，说明队列为空。只要两者不相等，消费者需要等待生产者填充数据完毕。
                 4. 当成功消费数组中的元素之后，需要把当前消费者索引 consumerIndex 的位置置为 NULL，然后把 consumerIndex 移动到数组下一个位置。
+
+6. 堆外内存泄露排查思路
+
+    现象： Java 进程占用内存很高，但是堆内存并不高的情况
+        
+        1. 堆外内存回收：jmap -histo:live <pid> 手动触发 FullGC, 观察堆外内存是否被回收，如果正常回收很可能是因为堆外设置太小，可以通过 -XX:MaxDirectMemorySize 调整。
+        2. 堆外内存代码监控：Java 提供了一系列不同类型的 MXBean 用于获取 JVM 进程线程、内存等监控指标；
+        3. Netty自带检测工具：-Dio.netty.leakDetection.level=paranoid，四种检测级别，需要关注日志中 LEAK 关键字。
+            1. disabled，关闭堆外内存泄漏检测；
+            2. simple，以 1% 的采样率进行堆外内存泄漏检测，消耗资源较少，属于默认的检测级别；
+            3. advanced，以 1% 的采样率进行堆外内存泄漏检测，并提供详细的内存泄漏报告；
+            4. paranoid，追踪全部堆外内存的使用情况，并提供详细的内存泄漏报告，属于最高的检测级别，性能开销较大，常用于本地调试排查问题。
                 
-                
-                
+        4. MemoryAnalyzer 内存分析
+        5. Btrace 神器       
