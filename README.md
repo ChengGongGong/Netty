@@ -660,7 +660,7 @@ io.netty.buffer.PoolChunk#allocate：
                 2. 添加特殊的 Handler 处理器，为 Pipeline 添加了一个 ChannelInitializer，用于添加 ServerSocketChannel 对应的 Handler，然后异步 task 的方式向 Pipeline添加 一个处理器 ServerBootstrapAcceptor(专门用于接收新的连接，然后把事件分发给 EventLoop 执行)。
                 3.  注册服务端 Channel：io.netty.channel.AbstractChannel.AbstractUnsafe#register0，选择一个 EventLoop 与当前 Channel 进行绑定，负责该channel的生命周期。
                     1. 调用 JDK 底层进行 Channel 注册；
-                    2. 触发 handlerAdded 事件，添加用户自定义的业务处理器(ServerSocketChannel 对应的 Handler)，handler() 方法是添加到服务端的Pipeline 上，而 childHandler() 方法是添加到客户端的 Pipeline 上
+                    2. 触发 handlerAdded 事件，添加用户自定义的业务处理器(ServerSocketChannel 对应的 Handler)，handler() 方法是添加到客户端的Pipeline 上，而 childHandler() 方法是添加到服务端的 Pipeline 上
                     3. 触发 channelRegistered 事件，
                     4. Channel 当前状态为活跃时，触发 channelActive 事件
         2. 端口绑定-io.netty.channel.AbstractChannel.AbstractUnsafe#bind
