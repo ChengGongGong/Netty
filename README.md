@@ -452,6 +452,18 @@ I/O 请求可以分为两个阶段，分别为调用阶段和执行阶段：
                     release() & retain()：引用计数的增减；
                     slice() & duplicate()：前者默认截取 readerIndex 到 writerIndex 之间的数据，后者截取的是整个原始 ByteBuf 信息
                     copy()：从原始的 ByteBuf 中拷贝所有信息，所有数据都是独立的
+            5. 获取和释放ByteBuf
+                    
+                    1. 在NioEventLoop处理I/O事件processSelectedKey()，OP_READ(可读事件)时， 在AbstractNioByteChannel.NioByteUnsafe.read() 处调用 ByteBufAllocator创建ByteBuf实例
+                        将TCP缓冲区的数据读取到ByteBuf中，并调用 pipeline.fireChannelRead(byteBuf) 进入pipeline 入站处理流水线。
+                    2. 默认情况下，随着入站处理器消息下传，TailContext会释放掉ReferenceCounted类型的消息----TailHandler自动释放ByteBuf实例。
+                    3. 如果入站事件没有到达末端，可以继承SimpleChannelInboundHandler，实现业务Handler，在其channelRead0(ctx, msg)方法中自动释放ByteBuf实例，
+                        此时也可以手动释放ByteBuf实例ReferenceCountUtil.release(buffer);
+                    4. 出站处理流程中，用到的 Bytebuf 缓冲区，一般是要发送的消息，通常由应用所申请，最后会来到HeadContext，由其自动释放ByteBuf实例。
+            6. 缓冲区内存的类型
+                
+ ![image](https://user-images.githubusercontent.com/41152743/148320358-b46c4de6-e1cd-4d85-bba0-d7003147f811.png)
+
  #### 2. 内存分配器
  内部碎片：内存是按 Page 进行分配的，每个大小为4K，如果需要很小的内存，也会分配 4K 大小的 Page，单个 Page 内只有一部分字节都被使用，剩余的字节形成了内部碎片。
  
@@ -608,7 +620,7 @@ io.netty.buffer.PoolChunk#allocate：
         
         1. 第一次拷贝：(DMA拷贝磁盘文件到内核缓冲区)，用户进程发起 read() 调用后，上下文从用户态切换至内核态，DMA 引擎从文件中读取数据，并存储到内核态缓冲区。
             注：DMA直接内存访问（Direct Memory Access） 技术，在进行 I/O 设备和内存的数据传输的时候，数据搬运的工作全部交给 DMA 控制器，而 CPU 不再参与任何与数据搬运相关的事情，这样 CPU 就可以去处理别的事务。
-        2. 第二次拷贝：(内核缓冲区的数据到用户缓冲区)，CPU将请求的数据从内核态缓冲区拷贝到用户态缓冲区，然后返回给用户进程，上下文从内核爱切换至用户态；
+        2. 第二次拷贝：(内核缓冲区的数据到用户缓冲区)，CPU将请求的数据从内核态缓冲区拷贝到用户态缓冲区，然后返回给用户进程，上下文从内核态切换至用户态；
         3. 第三次拷贝：(用户缓冲区的数据到内核socket缓冲区)，用户进程调用 send() 方法期望将数据发送到网络中，上下文从用户态切换至内核态，CPU将请求的数据从用户态缓冲区被拷贝到 Socket 缓冲区。
         4. 第四次拷贝：(内核socket缓冲区的数据到网卡缓冲区)，send() 系统调用结束返回给用户进程，上下文从内核态切换至用户态，DMA将把内核的 socket 缓冲区里的数据，拷贝到网卡的缓冲区里。
  
